@@ -88,12 +88,8 @@ async fn main() {
         error!("Failed to broadcast shutdown signal, no active receivers");
     }
 
-    let (arduino_result, state_bridge_result, outbound_result, inbound_result) = tokio::join!(
-        arduino_task,
-        state_bridge_task,
-        outbound_task,
-        inbound_task
-    );
+    let (arduino_result, state_bridge_result, outbound_result, inbound_result) =
+        tokio::join!(arduino_task, state_bridge_task, outbound_task, inbound_task);
 
     if let Err(e) = arduino_result {
         error!(error = %e, "Arduino manager task panicked");

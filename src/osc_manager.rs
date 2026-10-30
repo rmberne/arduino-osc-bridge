@@ -255,19 +255,13 @@ mod tests {
     #[test]
     fn maps_next_tab_command_with_float_arg() {
         let messages = command_to_osc('n');
-        assert_eq!(
-            messages,
-            vec![(ACTION_NEXT_TAB, vec![OscType::Float(1.0)])]
-        );
+        assert_eq!(messages, vec![(ACTION_NEXT_TAB, vec![OscType::Float(1.0)])]);
     }
 
     #[test]
     fn maps_previous_tab_command_with_float_arg() {
         let messages = command_to_osc('p');
-        assert_eq!(
-            messages,
-            vec![(ACTION_PREV_TAB, vec![OscType::Float(1.0)])]
-        );
+        assert_eq!(messages, vec![(ACTION_PREV_TAB, vec![OscType::Float(1.0)])]);
     }
 
     #[test]
