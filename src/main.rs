@@ -8,10 +8,14 @@
 //! - [`osc_manager`] turns those commands into OSC messages sent to Reaper,
 //!   and separately listens for OSC feedback coming back: `/tempo` updates
 //!   are logged, and `/play` / `/stop` are used as the source of truth for
-//!   transport state, which is relayed back down to the Arduino as a single
-//!   byte (`b'1'`/`b'0'`) over a serial downlink channel.
-//! - `main` wires both halves together with `mpsc` channels (commands up,
-//!   play-state bytes down) and drives graceful shutdown via `Ctrl+C`.
+//!   transport state, emitted as domain-level [`osc_manager::TransportState`]
+//!   events. `osc_manager` has no notion of hardware or wire protocols.
+//! - [`arduino_manager::run_state_bridge`] translates those `TransportState`
+//!   events into the single-byte wire protocol the Arduino sketch expects
+//!   (`b'1'`/`b'0'`) and feeds them into the serial downlink.
+//! - `main` wires everything together with `mpsc` channels (commands up,
+//!   transport state events down, translated to serial bytes) and drives
+//!   graceful shutdown via `Ctrl+C`.
 
 mod arduino_manager;
 mod osc_manager;
@@ -26,9 +30,13 @@ use tracing_subscriber::EnvFilter;
 /// outbound task. Generous enough to absorb bursts of button presses.
 const COMMAND_CHANNEL_CAPACITY: usize = 64;
 
-/// Capacity of the channel carrying play-state bytes (`b'1'`/`b'0'`) from
-/// the OSC inbound task down to the Arduino.
+/// Capacity of the channel carrying hardware-specific serial bytes
+/// (`b'1'`/`b'0'`) from the state bridge down to the Arduino.
 const SERIAL_CHANNEL_CAPACITY: usize = 32;
+
+/// Capacity of the channel carrying domain-level `TransportState` events
+/// from the OSC inbound task to the Arduino state bridge.
+const TRANSPORT_STATE_CHANNEL_CAPACITY: usize = 32;
 
 #[tokio::main]
 async fn main() {
@@ -45,6 +53,8 @@ async fn main() {
 
     let (command_tx, command_rx) = mpsc::channel::<char>(COMMAND_CHANNEL_CAPACITY);
     let (serial_tx, serial_rx) = mpsc::channel::<u8>(SERIAL_CHANNEL_CAPACITY);
+    let (state_tx, state_rx) =
+        mpsc::channel::<osc_manager::TransportState>(TRANSPORT_STATE_CHANNEL_CAPACITY);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let play_state = osc_manager::new_play_state();
 
@@ -53,6 +63,8 @@ async fn main() {
         serial_rx,
         shutdown_rx.clone(),
     ));
+
+    let state_bridge_task = tokio::spawn(arduino_manager::run_state_bridge(state_rx, serial_tx));
 
     let outbound_task = tokio::spawn(osc_manager::run_outbound(
         command_rx,
@@ -63,7 +75,7 @@ async fn main() {
     let inbound_task = tokio::spawn(osc_manager::run_inbound(
         feedback_addr,
         play_state,
-        serial_tx,
+        state_tx,
         shutdown_rx.clone(),
     ));
 
@@ -76,11 +88,18 @@ async fn main() {
         error!("Failed to broadcast shutdown signal, no active receivers");
     }
 
-    let (arduino_result, outbound_result, inbound_result) =
-        tokio::join!(arduino_task, outbound_task, inbound_task);
+    let (arduino_result, state_bridge_result, outbound_result, inbound_result) = tokio::join!(
+        arduino_task,
+        state_bridge_task,
+        outbound_task,
+        inbound_task
+    );
 
     if let Err(e) = arduino_result {
         error!(error = %e, "Arduino manager task panicked");
+    }
+    if let Err(e) = state_bridge_result {
+        error!(error = %e, "Arduino state bridge task panicked");
     }
     match outbound_result {
         Ok(Err(e)) => error!(error = %e, "OSC outbound task exited with error"),

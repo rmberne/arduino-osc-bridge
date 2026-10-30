@@ -25,6 +25,17 @@ pub fn new_play_state() -> PlayState {
     Arc::new(AtomicBool::new(false))
 }
 
+/// Domain-level transport event derived from Reaper's `/play` and `/stop`
+/// feedback. This is intentionally hardware-agnostic: `osc_manager` knows
+/// nothing about serial bytes, Arduinos, or any other downstream protocol.
+/// It's up to consumers (e.g. [`crate::arduino_manager`]) to translate this
+/// into whatever wire format their hardware expects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportState {
+    Playing,
+    Stopped,
+}
+
 /// Maps a single-character Arduino command to the OSC address(es) and
 /// arguments that should be sent to Reaper.
 ///
@@ -128,13 +139,16 @@ async fn send_command(socket: &UdpSocket, target_addr: SocketAddr, command: char
 /// Listens for OSC feedback from Reaper and reacts to it:
 /// - `/tempo` is logged (BPM + beat interval).
 /// - `/play` (with a positive float arg) marks the transport as playing and
-///   notifies the Arduino over `serial_tx` with `b'1'`.
+///   emits [`TransportState::Playing`] on `state_tx`.
 /// - `/stop` (with a positive float arg) marks the transport as stopped and
-///   notifies the Arduino over `serial_tx` with `b'0'`.
+///   emits [`TransportState::Stopped`] on `state_tx`.
+///
+/// `state_tx` carries domain-level events only; this module has no notion
+/// of how (or whether) those events get relayed to any hardware.
 pub async fn run_inbound(
     listen_addr: SocketAddr,
     play_state: PlayState,
-    serial_tx: mpsc::Sender<u8>,
+    state_tx: mpsc::Sender<TransportState>,
     mut shutdown: watch::Receiver<bool>,
 ) -> io::Result<()> {
     let socket = UdpSocket::bind(listen_addr).await?;
@@ -147,7 +161,7 @@ pub async fn run_inbound(
                 let (size, src) = result?;
                 debug!(bytes = size, from = %src, "Received UDP packet");
                 match rosc::decoder::decode_udp(&buf[..size]) {
-                    Ok((_, packet)) => handle_packet(packet, &play_state, &serial_tx).await,
+                    Ok((_, packet)) => handle_packet(packet, &play_state, &state_tx).await,
                     Err(e) => warn!(error = ?e, "Failed to decode OSC packet from Reaper"),
                 }
             }
@@ -166,21 +180,25 @@ pub async fn run_inbound(
 fn handle_packet<'a>(
     packet: OscPacket,
     play_state: &'a PlayState,
-    serial_tx: &'a mpsc::Sender<u8>,
+    state_tx: &'a mpsc::Sender<TransportState>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
     Box::pin(async move {
         match packet {
-            OscPacket::Message(msg) => handle_message(msg, play_state, serial_tx).await,
+            OscPacket::Message(msg) => handle_message(msg, play_state, state_tx).await,
             OscPacket::Bundle(bundle) => {
                 for nested in bundle.content {
-                    handle_packet(nested, play_state, serial_tx).await;
+                    handle_packet(nested, play_state, state_tx).await;
                 }
             }
         }
     })
 }
 
-async fn handle_message(msg: OscMessage, play_state: &PlayState, serial_tx: &mpsc::Sender<u8>) {
+async fn handle_message(
+    msg: OscMessage,
+    play_state: &PlayState,
+    state_tx: &mpsc::Sender<TransportState>,
+) {
     match msg.addr.as_str() {
         ADDR_TEMPO => match extract_tempo(&msg) {
             Some(bpm) => {
@@ -195,19 +213,19 @@ async fn handle_message(msg: OscMessage, play_state: &PlayState, serial_tx: &mps
         },
         ADDR_PLAY if is_positive_trigger(&msg) => {
             play_state.store(true, Ordering::Relaxed);
-            send_serial_byte(serial_tx, b'1').await;
+            send_transport_state(state_tx, TransportState::Playing).await;
         }
         ADDR_STOP if is_positive_trigger(&msg) => {
             play_state.store(false, Ordering::Relaxed);
-            send_serial_byte(serial_tx, b'0').await;
+            send_transport_state(state_tx, TransportState::Stopped).await;
         }
         _ => debug!(addr = %msg.addr, args = ?msg.args, "Received unhandled OSC message"),
     }
 }
 
-async fn send_serial_byte(serial_tx: &mpsc::Sender<u8>, byte: u8) {
-    if serial_tx.send(byte).await.is_err() {
-        warn!("Serial channel closed, dropping downlink byte to Arduino");
+async fn send_transport_state(state_tx: &mpsc::Sender<TransportState>, state: TransportState) {
+    if state_tx.send(state).await.is_err() {
+        warn!(?state, "Transport state channel closed, dropping event");
     }
 }
 
@@ -330,49 +348,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn play_feedback_sets_play_state_and_notifies_arduino() {
+    async fn play_feedback_sets_play_state_and_emits_playing_event() {
         let play_state = new_play_state();
-        let (serial_tx, mut serial_rx) = mpsc::channel::<u8>(4);
+        let (state_tx, mut state_rx) = mpsc::channel::<TransportState>(4);
 
         let msg = OscMessage {
             addr: "/play".to_string(),
             args: vec![OscType::Float(1.0)],
         };
-        handle_message(msg, &play_state, &serial_tx).await;
+        handle_message(msg, &play_state, &state_tx).await;
 
         assert!(play_state.load(Ordering::Relaxed));
-        assert_eq!(serial_rx.recv().await, Some(b'1'));
+        assert_eq!(state_rx.recv().await, Some(TransportState::Playing));
     }
 
     #[tokio::test]
-    async fn stop_feedback_clears_play_state_and_notifies_arduino() {
+    async fn stop_feedback_clears_play_state_and_emits_stopped_event() {
         let play_state = new_play_state();
         play_state.store(true, Ordering::Relaxed);
-        let (serial_tx, mut serial_rx) = mpsc::channel::<u8>(4);
+        let (state_tx, mut state_rx) = mpsc::channel::<TransportState>(4);
 
         let msg = OscMessage {
             addr: "/stop".to_string(),
             args: vec![OscType::Float(1.0)],
         };
-        handle_message(msg, &play_state, &serial_tx).await;
+        handle_message(msg, &play_state, &state_tx).await;
 
         assert!(!play_state.load(Ordering::Relaxed));
-        assert_eq!(serial_rx.recv().await, Some(b'0'));
+        assert_eq!(state_rx.recv().await, Some(TransportState::Stopped));
     }
 
     #[tokio::test]
     async fn play_feedback_with_non_positive_value_is_ignored() {
         let play_state = new_play_state();
-        let (serial_tx, mut serial_rx) = mpsc::channel::<u8>(4);
+        let (state_tx, mut state_rx) = mpsc::channel::<TransportState>(4);
 
         let msg = OscMessage {
             addr: "/play".to_string(),
             args: vec![OscType::Float(0.0)],
         };
-        handle_message(msg, &play_state, &serial_tx).await;
+        handle_message(msg, &play_state, &state_tx).await;
 
         assert!(!play_state.load(Ordering::Relaxed));
-        drop(serial_tx);
-        assert_eq!(serial_rx.recv().await, None);
+        drop(state_tx);
+        assert_eq!(state_rx.recv().await, None);
     }
 }

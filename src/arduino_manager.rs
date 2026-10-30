@@ -21,6 +21,8 @@ use tokio::sync::{mpsc, watch, Mutex};
 use tokio_serial::{SerialPort, SerialPortBuilderExt, SerialStream};
 use tracing::{debug, error, info, warn};
 
+use crate::osc_manager::TransportState;
+
 /// Baud rate expected by the Arduino sketch.
 pub const BAUD_RATE: u32 = 115_200;
 
@@ -188,6 +190,30 @@ pub async fn run(
     info!("Arduino manager shut down");
 }
 
+/// Bridges domain-level [`TransportState`] events (as produced by
+/// `osc_manager::run_inbound`) onto the hardware-specific single-byte wire
+/// protocol this Arduino sketch expects: `b'1'` for playing, `b'0'` for
+/// stopped. This is the only place in the codebase that knows about that
+/// mapping; `osc_manager` stays hardware-agnostic.
+pub async fn run_state_bridge(
+    mut state_rx: mpsc::Receiver<TransportState>,
+    serial_tx: mpsc::Sender<u8>,
+) {
+    while let Some(state) = state_rx.recv().await {
+        let byte = match state {
+            TransportState::Playing => b'1',
+            TransportState::Stopped => b'0',
+        };
+
+        if serial_tx.send(byte).await.is_err() {
+            warn!("Serial downlink channel closed, dropping transport state update");
+            break;
+        }
+    }
+
+    debug!("Transport state channel closed, stopping state bridge task");
+}
+
 /// Drains bytes meant for the Arduino (play/stop state sync) from
 /// `serial_rx` and writes each one directly to `writer`, flushing after
 /// every write so the Arduino sees it promptly.
@@ -337,6 +363,23 @@ mod tests {
         assert_eq!(parse_command_line("\n"), None);
         assert_eq!(parse_command_line(""), None);
         assert_eq!(parse_command_line("ss"), None);
+    }
+
+    #[tokio::test]
+    async fn state_bridge_translates_transport_state_to_wire_bytes() {
+        let (state_tx, state_rx) = mpsc::channel::<TransportState>(4);
+        let (serial_tx, mut serial_rx) = mpsc::channel::<u8>(4);
+
+        tokio::spawn(run_state_bridge(state_rx, serial_tx));
+
+        state_tx.send(TransportState::Playing).await.unwrap();
+        assert_eq!(serial_rx.recv().await, Some(b'1'));
+
+        state_tx.send(TransportState::Stopped).await.unwrap();
+        assert_eq!(serial_rx.recv().await, Some(b'0'));
+
+        drop(state_tx);
+        assert_eq!(serial_rx.recv().await, None);
     }
 
     fn tempdir() -> PathBuf {
