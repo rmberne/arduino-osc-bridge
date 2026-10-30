@@ -1,0 +1,99 @@
+name: Release macOS Installer
+
+on:
+  release:
+    types: [ published ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: arduino-osc-bridge
+  PKG_ID: com.example.arduino-osc-bridge
+  PKG_NAME: arduino-osc-bridge
+
+jobs:
+  build-pkg:
+    name: Build Unsigned .pkg
+    runs-on: macos-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (universal targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Resolve version and package path
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "PKG_PATH=dist/${PKG_NAME}-${VERSION}.pkg" >> "$GITHUB_ENV"
+
+      - name: Build x86_64 binary
+        run: cargo build --release --locked --target x86_64-apple-darwin
+
+      - name: Build aarch64 binary
+        run: cargo build --release --locked --target aarch64-apple-darwin
+
+      - name: Create universal binary
+        run: |
+          mkdir -p payload/usr/local/bin
+          lipo -create \
+            "target/x86_64-apple-darwin/release/${BIN_NAME}" \
+            "target/aarch64-apple-darwin/release/${BIN_NAME}" \
+            -output "payload/usr/local/bin/${BIN_NAME}"
+          lipo -info "payload/usr/local/bin/${BIN_NAME}"
+
+      - name: Stage launchd plist
+        run: |
+          mkdir -p payload/Library/LaunchDaemons
+          sed -e "s|@PKG_ID@|${PKG_ID}|g" -e "s|@BIN_NAME@|${BIN_NAME}|g" \
+            packaging/macos/launchd.plist.template \
+            > "payload/Library/LaunchDaemons/${PKG_ID}.plist"
+          plutil -lint "payload/Library/LaunchDaemons/${PKG_ID}.plist"
+
+      - name: Stage postinstall script
+        run: |
+          mkdir -p scripts
+          sed -e "s|@PKG_ID@|${PKG_ID}|g" -e "s|@BIN_NAME@|${BIN_NAME}|g" \
+            packaging/macos/postinstall.template > scripts/postinstall
+          chmod 755 scripts/postinstall
+
+      - name: Build component package
+        run: |
+          mkdir -p dist
+          pkgbuild \
+            --root payload \
+            --scripts scripts \
+            --identifier "$PKG_ID" \
+            --version "$VERSION" \
+            --install-location / \
+            --ownership recommended \
+            "$PKG_PATH"
+          pkgutil --payload-files "$PKG_PATH"
+
+      - name: Generate checksum
+        run: shasum -a 256 "$PKG_PATH" > "${PKG_PATH}.sha256"
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PKG_NAME }}-macos-universal-pkg
+          path: |
+            dist/*.pkg
+            dist/*.sha256
+
+      - name: Publish installer to GitHub release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.pkg
+            dist/*.sha256

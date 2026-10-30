@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+
+PLIST="/Library/LaunchDaemons/@PKG_ID@.plist"
+BIN="/usr/local/bin/@BIN_NAME@"
+
+chown root:wheel "$BIN" "$PLIST"
+chmod 755 "$BIN"
+chmod 644 "$PLIST"
+
+launchctl bootout system "$PLIST" >/dev/null 2>&1 || true
+launchctl bootstrap system "$PLIST"
+
+exit 0
