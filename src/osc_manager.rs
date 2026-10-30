@@ -18,6 +18,8 @@ const ACTION_PREV_TAB: &str = "/action/40862";
 const ADDR_TEMPO: &str = "/tempo";
 const ADDR_PLAY: &str = "/play";
 const ADDR_STOP: &str = "/stop";
+const ADDR_PROJECT_NAME: &str = "/project/name";
+const ADDR_TITLE: &str = "/title";
 
 pub type PlayState = Arc<AtomicBool>;
 
@@ -34,6 +36,24 @@ pub fn new_play_state() -> PlayState {
 pub enum TransportState {
     Playing,
     Stopped,
+}
+
+/// Maps Reaper's current project tab information
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectState {
+    pub name: String,
+    pub bpm: f32,
+    pub is_playing: bool,
+}
+
+impl Default for ProjectState {
+    fn default() -> Self {
+        Self {
+            name: "Untitled Project".to_string(),
+            bpm: 120.0,
+            is_playing: false,
+        }
+    }
 }
 
 /// Maps a single-character Arduino command to the OSC address(es) and
@@ -218,6 +238,12 @@ async fn handle_message(
         ADDR_STOP if is_positive_trigger(&msg) => {
             play_state.store(false, Ordering::Relaxed);
             send_transport_state(state_tx, TransportState::Stopped).await;
+        }
+        ADDR_PROJECT_NAME | ADDR_TITLE => {
+            if let Some(OscType::String(name)) = msg.args.first() {
+                let name_str = name.clone();
+                
+            }
         }
         _ => debug!(addr = %msg.addr, args = ?msg.args, "Received unhandled OSC message"),
     }

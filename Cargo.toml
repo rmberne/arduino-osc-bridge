@@ -7,6 +7,14 @@ description = "Asynchronous Rust daemon bridging an Arduino hardware controller 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 tokio-serial = "5.4"
-rosc = "0.10"
+tokio-stream = { version = "0.1.19", features = ["sync"] }
+rosc = "0.11.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+axum = "0.8.9"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+

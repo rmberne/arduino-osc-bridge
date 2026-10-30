@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stage Monitor</title>
+    <style>
+        body {
+            background-color: #000;
+            color: #fff;
+            font-family: system-ui, sans-serif;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            height: 100vh;
+            margin: 0;
+            padding: 2rem;
+            box-sizing: border-box;
+        }
+
+        .project {
+            font-size: 2.5rem;
+            color: #a1a1aa;
+            font-weight: 700;
+        }
+
+        .tempo {
+            font-size: 10rem;
+            font-weight: 900;
+            text-align: center;
+        }
+
+        .status {
+            font-size: 3rem;
+            font-weight: 800;
+            text-align: center;
+            padding: 1rem;
+            border-radius: 12px;
+        }
+
+        .playing {
+            background-color: #16a34a;
+        }
+
+        .stopped {
+            background-color: #27272a;
+            color: #71717a;
+        }
+    </style>
+</head>
+<body>
+<div id="project-name" class="project">Connecting...</div>
+<div class="tempo"><span id="tempo-value">---</span> <span style="font-size: 2rem; color: #71717a;">BPM</span></div>
+<div id="status" class="status stopped">STOPPED</div>
+
+<script>
+    // DOM element references
+    const elProject = document.getElementById("project-name");
+    const elTempo = document.getElementById("tempo-value");
+    const elStatus = document.getElementById("status");
+    const elBeat = document.getElementById("beat-indicator"); // Optional beat dot element
+
+    let isPlaying = false;
+    let currentBpm = 120;
+    let beatIntervalId = null;
+
+    // Open SSE connection to the Axum route
+    const evtSource = new EventSource("/events");
+
+    evtSource.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data);
+
+            // 1. Update Project Title
+            if (elProject && data.name) {
+                elProject.innerText = data.name || "Untitled Project";
+            }
+
+            // 2. Update Tempo (BPM)
+            if (data.bpm && data.bpm !== currentBpm) {
+                currentBpm = data.bpm;
+                if (elTempo) {
+                    elTempo.innerText = data.bpm.toFixed(1);
+                }
+                // Recalculate metronome pulse speed if tempo changes while playing
+                if (isPlaying) {
+                    startMetronomePulse();
+                }
+            } else if (elTempo && elTempo.innerText === "---") {
+                elTempo.innerText = data.bpm ? data.bpm.toFixed(1) : "120.0";
+            }
+
+            // 3. Update Transport State (Playing vs Stopped)
+            if (typeof data.is_playing === "boolean" && data.is_playing !== isPlaying) {
+                isPlaying = data.is_playing;
+                updateTransportUI(isPlaying);
+            }
+        } catch (err) {
+            console.error("Failed to parse SSE payload:", err);
+        }
+    };
+
+    evtSource.onerror = (err) => {
+        console.warn("SSE connection interrupted. Browser will automatically retry...", err);
+    };
+
+    function updateTransportUI(playing) {
+        if (!elStatus) return;
+
+        if (playing) {
+            elStatus.innerText = "PLAYING";
+            elStatus.className = "status playing";
+            startMetronomePulse();
+        } else {
+            elStatus.innerText = "STOPPED";
+            elStatus.className = "status stopped";
+            stopMetronomePulse();
+        }
+    }
+
+    // Visual metronome pulse helper functions
+    function triggerFlash() {
+        if (!elBeat) return;
+        elBeat.classList.add("flash");
+        setTimeout(() => elBeat.classList.remove("flash"), 70);
+    }
+
+    function startMetronomePulse() {
+        stopMetronomePulse();
+        triggerFlash(); // Flash immediately on start
+        const intervalMs = (60 / currentBpm) * 1000;
+        beatIntervalId = setInterval(triggerFlash, intervalMs);
+    }
+
+    function stopMetronomePulse() {
+        if (beatIntervalId) {
+            clearInterval(beatIntervalId);
+            beatIntervalId = null;
+        }
+        if (elBeat) {
+            elBeat.classList.remove("flash");
+        }
+    }
+</script>
+</body>
+</html>
+
