@@ -15,7 +15,7 @@ const ACTION_PLAY_STOP: &str = "/action/40044";
 const ACTION_TOGGLE_MUTE: &str = "/action/6";
 const ACTION_NEXT_TAB: &str = "/action/40861";
 const ACTION_PREV_TAB: &str = "/action/40862";
-const ADDR_TEMPO: &str = "/tempo";
+const ADDR_TEMPO: &str = "/tempo/raw";
 const ADDR_PLAY: &str = "/play";
 const ADDR_STOP: &str = "/stop";
 const ADDR_PROJECT_NAME: &str = "/project/name";
@@ -89,7 +89,11 @@ pub fn extract_tempo(msg: &OscMessage) -> Option<f32> {
     if msg.addr != ADDR_TEMPO {
         return None;
     }
-    msg.args.first().cloned().and_then(OscType::float)
+    msg.args
+        .first()
+        .cloned()
+        .and_then(OscType::float)
+        .filter(|bpm| bpm.is_finite() && *bpm > 0.0)
 }
 
 pub fn beat_interval_ms(bpm: f32) -> f32 {
@@ -157,11 +161,12 @@ async fn send_command(socket: &UdpSocket, target_addr: SocketAddr, command: char
 }
 
 /// Listens for OSC feedback from Reaper and reacts to it:
-/// - `/tempo` is logged (BPM + beat interval).
+/// - `/tempo/raw` updates the displayed BPM and logs the beat interval.
+/// - `/project/name` and `/title` update the displayed project name.
 /// - `/play` (with a positive float arg) marks the transport as playing and
-///   emits [`TransportState::Playing`] on `state_tx`.
+///   emits [`TransportState::Playing`] on `state_tx` and updates display state.
 /// - `/stop` (with a positive float arg) marks the transport as stopped and
-///   emits [`TransportState::Stopped`] on `state_tx`.
+///   emits [`TransportState::Stopped`] on `state_tx` and updates display state.
 ///
 /// `state_tx` carries domain-level events only; this module has no notion
 /// of how (or whether) those events get relayed to any hardware.
@@ -169,6 +174,7 @@ pub async fn run_inbound(
     listen_addr: SocketAddr,
     play_state: PlayState,
     state_tx: mpsc::Sender<TransportState>,
+    display_tx: watch::Sender<ProjectState>,
     mut shutdown: watch::Receiver<bool>,
 ) -> io::Result<()> {
     let socket = UdpSocket::bind(listen_addr).await?;
@@ -181,7 +187,9 @@ pub async fn run_inbound(
                 let (size, src) = result?;
                 debug!(bytes = size, from = %src, "Received UDP packet");
                 match rosc::decoder::decode_udp(&buf[..size]) {
-                    Ok((_, packet)) => handle_packet(packet, &play_state, &state_tx).await,
+                    Ok((_, packet)) => {
+                        handle_packet(packet, &play_state, &state_tx, &display_tx).await
+                    }
                     Err(e) => warn!(error = ?e, "Failed to decode OSC packet from Reaper"),
                 }
             }
@@ -201,23 +209,25 @@ fn handle_packet<'a>(
     packet: OscPacket,
     play_state: &'a PlayState,
     state_tx: &'a mpsc::Sender<TransportState>,
+    display_tx: &'a watch::Sender<ProjectState>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
     Box::pin(async move {
         match packet {
-            OscPacket::Message(msg) => handle_message(msg, play_state, state_tx).await,
+            OscPacket::Message(msg) => handle_message(msg, play_state, state_tx, display_tx).await,
             OscPacket::Bundle(bundle) => {
                 for nested in bundle.content {
-                    handle_packet(nested, play_state, state_tx).await;
+                    handle_packet(nested, play_state, state_tx, display_tx).await;
                 }
             }
         }
     })
 }
 
-async fn handle_message(
+pub(crate) async fn handle_message(
     msg: OscMessage,
     play_state: &PlayState,
     state_tx: &mpsc::Sender<TransportState>,
+    display_tx: &watch::Sender<ProjectState>,
 ) {
     match msg.addr.as_str() {
         ADDR_TEMPO => match extract_tempo(&msg) {
@@ -228,21 +238,25 @@ async fn handle_message(
                     beat_interval_ms = interval,
                     "Received tempo update from Reaper"
                 );
+                display_tx.send_modify(|state| state.bpm = bpm);
             }
-            None => warn!(addr = %msg.addr, "Received /tempo message without a float argument"),
+            None => {
+                warn!(addr = %msg.addr, "Received /tempo/raw message without a positive finite float")
+            }
         },
         ADDR_PLAY if is_positive_trigger(&msg) => {
             play_state.store(true, Ordering::Relaxed);
+            display_tx.send_modify(|state| state.is_playing = true);
             send_transport_state(state_tx, TransportState::Playing).await;
         }
         ADDR_STOP if is_positive_trigger(&msg) => {
             play_state.store(false, Ordering::Relaxed);
+            display_tx.send_modify(|state| state.is_playing = false);
             send_transport_state(state_tx, TransportState::Stopped).await;
         }
         ADDR_PROJECT_NAME | ADDR_TITLE => {
             if let Some(OscType::String(name)) = msg.args.first() {
-                let name_str = name.clone();
-                
+                display_tx.send_modify(|state| state.name.clone_from(name));
             }
         }
         _ => debug!(addr = %msg.addr, args = ?msg.args, "Received unhandled OSC message"),
@@ -318,7 +332,7 @@ mod tests {
     #[test]
     fn decodes_tempo_message_from_mock_bytes() {
         let packet = OscPacket::Message(OscMessage {
-            addr: "/tempo".to_string(),
+            addr: "/tempo/raw".to_string(),
             args: vec![OscType::Float(128.0)],
         });
         let bytes = rosc::encoder::encode(&packet).expect("encoding should succeed");
@@ -344,9 +358,18 @@ mod tests {
     }
 
     #[test]
-    fn extract_tempo_handles_missing_argument() {
+    fn extract_tempo_ignores_normalized_tempo_address() {
         let msg = OscMessage {
             addr: "/tempo".to_string(),
+            args: vec![OscType::Float(0.3125)],
+        };
+        assert_eq!(extract_tempo(&msg), None);
+    }
+
+    #[test]
+    fn extract_tempo_handles_missing_argument() {
+        let msg = OscMessage {
+            addr: "/tempo/raw".to_string(),
             args: vec![],
         };
         assert_eq!(extract_tempo(&msg), None);
@@ -355,7 +378,7 @@ mod tests {
     #[test]
     fn extract_tempo_handles_wrong_argument_type() {
         let msg = OscMessage {
-            addr: "/tempo".to_string(),
+            addr: "/tempo/raw".to_string(),
             args: vec![OscType::String("not-a-float".to_string())],
         };
         assert_eq!(extract_tempo(&msg), None);
@@ -371,15 +394,17 @@ mod tests {
     async fn play_feedback_sets_play_state_and_emits_playing_event() {
         let play_state = new_play_state();
         let (state_tx, mut state_rx) = mpsc::channel::<TransportState>(4);
+        let (display_tx, display_rx) = watch::channel(ProjectState::default());
 
         let msg = OscMessage {
             addr: "/play".to_string(),
             args: vec![OscType::Float(1.0)],
         };
-        handle_message(msg, &play_state, &state_tx).await;
+        handle_message(msg, &play_state, &state_tx, &display_tx).await;
 
         assert!(play_state.load(Ordering::Relaxed));
         assert_eq!(state_rx.recv().await, Some(TransportState::Playing));
+        assert!(display_rx.borrow().is_playing);
     }
 
     #[tokio::test]
@@ -387,30 +412,183 @@ mod tests {
         let play_state = new_play_state();
         play_state.store(true, Ordering::Relaxed);
         let (state_tx, mut state_rx) = mpsc::channel::<TransportState>(4);
+        let (display_tx, display_rx) = watch::channel(ProjectState {
+            is_playing: true,
+            ..ProjectState::default()
+        });
 
         let msg = OscMessage {
             addr: "/stop".to_string(),
             args: vec![OscType::Float(1.0)],
         };
-        handle_message(msg, &play_state, &state_tx).await;
+        handle_message(msg, &play_state, &state_tx, &display_tx).await;
 
         assert!(!play_state.load(Ordering::Relaxed));
         assert_eq!(state_rx.recv().await, Some(TransportState::Stopped));
+        assert!(!display_rx.borrow().is_playing);
     }
 
     #[tokio::test]
     async fn play_feedback_with_non_positive_value_is_ignored() {
         let play_state = new_play_state();
         let (state_tx, mut state_rx) = mpsc::channel::<TransportState>(4);
+        let (display_tx, display_rx) = watch::channel(ProjectState::default());
 
         let msg = OscMessage {
             addr: "/play".to_string(),
             args: vec![OscType::Float(0.0)],
         };
-        handle_message(msg, &play_state, &state_tx).await;
+        handle_message(msg, &play_state, &state_tx, &display_tx).await;
 
         assert!(!play_state.load(Ordering::Relaxed));
+        assert!(!display_rx.borrow().is_playing);
         drop(state_tx);
         assert_eq!(state_rx.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn project_feedback_updates_name_tempo_and_transport_in_nested_bundles() {
+        let play_state = new_play_state();
+        let (transport_tx, mut transport_rx) = mpsc::channel::<TransportState>(4);
+        let (display_tx, display_rx) = watch::channel(ProjectState::default());
+        let packet = OscPacket::Bundle(rosc::OscBundle {
+            timetag: (0, 1).into(),
+            content: vec![
+                OscPacket::Message(OscMessage {
+                    addr: ADDR_PROJECT_NAME.to_string(),
+                    args: vec![OscType::String("Project Name".to_string())],
+                }),
+                OscPacket::Bundle(rosc::OscBundle {
+                    timetag: (0, 1).into(),
+                    content: vec![
+                        OscPacket::Message(OscMessage {
+                            addr: "/tempo/raw".to_string(),
+                            args: vec![OscType::Float(134.5)],
+                        }),
+                        OscPacket::Message(OscMessage {
+                            addr: ADDR_TITLE.to_string(),
+                            args: vec![OscType::String("Window Title".to_string())],
+                        }),
+                        OscPacket::Message(OscMessage {
+                            addr: ADDR_PLAY.to_string(),
+                            args: vec![OscType::Float(1.0)],
+                        }),
+                    ],
+                }),
+            ],
+        });
+
+        handle_packet(packet, &play_state, &transport_tx, &display_tx).await;
+
+        assert_eq!(
+            *display_rx.borrow(),
+            ProjectState {
+                name: "Window Title".to_string(),
+                bpm: 134.5,
+                is_playing: true,
+            }
+        );
+        assert_eq!(transport_rx.recv().await, Some(TransportState::Playing));
+    }
+
+    #[tokio::test]
+    async fn malformed_or_invalid_project_feedback_preserves_last_valid_state() {
+        let play_state = new_play_state();
+        let (transport_tx, mut transport_rx) = mpsc::channel::<TransportState>(4);
+        let initial = ProjectState {
+            name: "Existing Project".to_string(),
+            bpm: 110.0,
+            is_playing: false,
+        };
+        let (display_tx, display_rx) = watch::channel(initial.clone());
+
+        for msg in [
+            OscMessage {
+                addr: ADDR_PROJECT_NAME.to_string(),
+                args: vec![OscType::Int(7)],
+            },
+            OscMessage {
+                addr: ADDR_TITLE.to_string(),
+                args: vec![],
+            },
+            OscMessage {
+                addr: "/tempo/raw".to_string(),
+                args: vec![OscType::String("fast".to_string())],
+            },
+            OscMessage {
+                addr: "/tempo/raw".to_string(),
+                args: vec![OscType::Float(0.0)],
+            },
+            OscMessage {
+                addr: "/tempo/raw".to_string(),
+                args: vec![OscType::Float(f32::NAN)],
+            },
+            OscMessage {
+                addr: ADDR_PLAY.to_string(),
+                args: vec![OscType::String("playing".to_string())],
+            },
+        ] {
+            handle_message(msg, &play_state, &transport_tx, &display_tx).await;
+        }
+
+        assert_eq!(*display_rx.borrow(), initial);
+        assert!(!play_state.load(Ordering::Relaxed));
+        drop(transport_tx);
+        assert_eq!(transport_rx.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn raw_tempo_feedback_wins_over_normalized_and_string_values() {
+        let play_state = new_play_state();
+        let (transport_tx, _transport_rx) = mpsc::channel::<TransportState>(4);
+        let (display_tx, display_rx) = watch::channel(ProjectState::default());
+        let packet = OscPacket::Bundle(rosc::OscBundle {
+            timetag: (0, 1).into(),
+            content: vec![
+                OscPacket::Message(OscMessage {
+                    addr: "/tempo".to_string(),
+                    args: vec![OscType::Float(0.3125)],
+                }),
+                OscPacket::Message(OscMessage {
+                    addr: "/tempo/raw".to_string(),
+                    args: vec![OscType::Float(120.0)],
+                }),
+                OscPacket::Message(OscMessage {
+                    addr: "/tempo/str".to_string(),
+                    args: vec![OscType::String("120".to_string())],
+                }),
+            ],
+        });
+
+        handle_packet(packet, &play_state, &transport_tx, &display_tx).await;
+        assert_eq!(display_rx.borrow().bpm, 120.0);
+
+        let reversed_packet = OscPacket::Bundle(rosc::OscBundle {
+            timetag: (0, 1).into(),
+            content: vec![
+                OscPacket::Message(OscMessage {
+                    addr: "/tempo/raw".to_string(),
+                    args: vec![OscType::Float(120.5)],
+                }),
+                OscPacket::Message(OscMessage {
+                    addr: "/tempo".to_string(),
+                    args: vec![OscType::Float(0.5)],
+                }),
+            ],
+        });
+        handle_packet(reversed_packet, &play_state, &transport_tx, &display_tx).await;
+        assert_eq!(display_rx.borrow().bpm, 120.5);
+
+        handle_message(
+            OscMessage {
+                addr: "/tempo".to_string(),
+                args: vec![OscType::Float(0.75)],
+            },
+            &play_state,
+            &transport_tx,
+            &display_tx,
+        )
+        .await;
+        assert_eq!(display_rx.borrow().bpm, 120.5);
     }
 }

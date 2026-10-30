@@ -105,6 +105,7 @@ async fn main() {
     let (serial_tx, serial_rx) = mpsc::channel::<u8>(SERIAL_CHANNEL_CAPACITY);
     let (state_tx, state_rx) =
         mpsc::channel::<osc_manager::TransportState>(TRANSPORT_STATE_CHANNEL_CAPACITY);
+    let (display_tx, display_rx) = watch::channel(osc_manager::ProjectState::default());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let play_state = osc_manager::new_play_state();
 
@@ -138,11 +139,12 @@ async fn main() {
         feedback_addr,
         play_state,
         state_tx,
+        display_tx,
         shutdown_rx.clone(),
     ));
 
     if options.web_server {
-        tokio::spawn(web_server::run_web_server(shutdown_rx.clone()));
+        tokio::spawn(web_server::run_web_server(shutdown_rx.clone(), display_rx));
     } else {
         info!("Web server disabled");
     }

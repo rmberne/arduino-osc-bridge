@@ -26,8 +26,9 @@ struct DisplayStateDTO<'a> {
 
 impl<'a> From<&'a ProjectState> for DisplayStateDTO<'a> {
     fn from(state: &'a ProjectState) -> Self {
+        let name = &state.name;
         Self {
-            name: &state.name,
+            name: name.rfind('.').map_or(name, |idx| &name[..idx]),
             bpm: state.bpm,
             is_playing: state.is_playing,
         }
@@ -62,9 +63,11 @@ fn create_app(state: watch::Receiver<ProjectState>) -> Router {
         .with_state(state)
 }
 
-pub async fn run_web_server(mut shutdown: watch::Receiver<bool>) -> std::io::Result<()> {
-    let (_state_tx, state_rx) = watch::channel(ProjectState::default());
-    let app = create_app(state_rx);
+pub async fn run_web_server(
+    mut shutdown: watch::Receiver<bool>,
+    display_rx: watch::Receiver<ProjectState>,
+) -> std::io::Result<()> {
+    let app = create_app(display_rx);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -83,10 +86,13 @@ pub async fn run_web_server(mut shutdown: watch::Receiver<bool>) -> std::io::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::osc_manager::{handle_message, new_play_state, TransportState};
     use axum::{
         body::Body,
         http::{header, Request, StatusCode},
     };
+    use rosc::{OscMessage, OscType};
+    use tokio::sync::mpsc;
     use tower::ServiceExt; // Provides the `oneshot` method on `Router`
 
     #[tokio::test]
@@ -225,5 +231,56 @@ mod tests {
             .await
             .unwrap();
         assert!(stream_end.is_none());
+    }
+
+    #[tokio::test]
+    async fn osc_feedback_is_published_through_the_events_endpoint() {
+        let (display_tx, display_rx) = watch::channel(ProjectState::default());
+        let play_state = new_play_state();
+        let (transport_tx, mut transport_rx) = mpsc::channel::<TransportState>(4);
+
+        for (addr, args) in [
+            (
+                "/project/name",
+                vec![OscType::String("Live Project".to_string())],
+            ),
+            ("/tempo/raw", vec![OscType::Float(126.0)]),
+            ("/play", vec![OscType::Float(1.0)]),
+        ] {
+            handle_message(
+                OscMessage {
+                    addr: addr.to_string(),
+                    args,
+                },
+                &play_state,
+                &transport_tx,
+                &display_tx,
+            )
+            .await;
+        }
+
+        assert_eq!(transport_rx.recv().await, Some(TransportState::Playing));
+
+        let app = create_app(display_rx);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut body = response.into_body().into_data_stream();
+        let event = tokio::time::timeout(Duration::from_secs(1), body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let event = String::from_utf8(event.to_vec()).unwrap();
+
+        assert!(event.contains(r#""name":"Live Project""#));
+        assert!(event.contains(r#""bpm":126.0"#));
+        assert!(event.contains(r#""is_playing":true"#));
     }
 }

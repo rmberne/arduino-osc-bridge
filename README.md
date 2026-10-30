@@ -12,6 +12,8 @@ synchronization so status LEDs stay completely in sync with REAPER.
 
 - **Bidirectional Transport Sync:** Tracks actual REAPER transport state (`/play` and `/stop` feedback) rather than
   relying on optimistic local state. Works seamlessly when playback is toggled via laptop keyboard or UI clicks.
+- **Project Display Updates:** Shares REAPER project name (`/project/name` or `/title`), tempo (`/tempo/raw`) and
+  transport (`/play` / `/stop`) feedback with the web display in real time.
 - **Dynamic Serial Auto-Detection:** Automatically scans `/dev` for Arduino devices (`cu.usbmodem*`, `cu.usbserial*`,
   `ttyACM*`, `ttyUSB*`) with continuous background polling (3s interval) to recover gracefully from unplugged cables or
   board resets.
@@ -36,11 +38,14 @@ synchronization so status LEDs stay completely in sync with REAPER.
 
 ### REAPER to Hardware (Inbound UDP `127.0.0.1:9000` & Serial Downlink)
 
-| Incoming OSC Address | Payload / Type | Internal Event                             | Arduino Serial Downlink |
+ | Incoming OSC Address | Payload / Type | Internal Event                             | Arduino Serial Downlink |
 |:---------------------|:---------------|:-------------------------------------------|:-----------------------:|
 | `/play`              | Float > `0.0`  | `TransportState::Playing`                  |       Byte `b'1'`       |
 | `/stop`              | Float > `0.0`  | `TransportState::Stopped`                  |       Byte `b'0'`       |
-| `/tempo`             | Float (BPM)    | Logged BPM & Calculated Beat Interval (ms) |            —            |
+| `/tempo/raw`         | Positive Float (BPM) | Updates displayed BPM & logs beat interval (ms) |            —            |
+| `/tempo`             | Normalized Float | Ignored; REAPER's `/tempo` feedback is not BPM |            —            |
+| `/project/name`      | String         | Updates displayed project name             |            —            |
+| `/title`             | String         | Updates displayed project name             |            —            |
 
 ---
 
