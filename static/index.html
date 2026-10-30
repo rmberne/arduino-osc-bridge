@@ -12,26 +12,40 @@
             display: flex;
             flex-direction: column;
             justify-content: space-between;
-            height: 100vh;
+            min-height: 100vh;
+            min-height: 100dvh;
             margin: 0;
-            padding: 2rem;
+            padding: clamp(1rem, 4vw, 2rem);
+            gap: 1rem;
             box-sizing: border-box;
         }
 
         .project {
-            font-size: 2.5rem;
+            font-size: clamp(1.25rem, 5vw, 2.5rem);
             color: #a1a1aa;
             font-weight: 700;
+            overflow-wrap: anywhere;
         }
 
         .tempo {
-            font-size: 10rem;
+            font-size: clamp(2.5rem, 18vw, 10rem);
             font-weight: 900;
             text-align: center;
+            line-height: 1.1;
+            overflow-wrap: anywhere;
+        }
+
+        .tempo-unit {
+            font-size: clamp(1rem, 4vw, 2rem);
+            color: #71717a;
+        }
+
+        #tempo-value.flash {
+            color: #16a34a;
         }
 
         .status {
-            font-size: 3rem;
+            font-size: clamp(1.5rem, 6vw, 3rem);
             font-weight: 800;
             text-align: center;
             padding: 1rem;
@@ -50,19 +64,23 @@
 </head>
 <body>
 <div id="project-name" class="project">Connecting...</div>
-<div class="tempo"><span id="tempo-value">---</span> <span style="font-size: 2rem; color: #71717a;">BPM</span></div>
+<div class="tempo"><span id="tempo-value">---</span> <span class="tempo-unit">BPM</span></div>
 <div id="status" class="status stopped">STOPPED</div>
 
 <script>
+    // FLAGS
+    const flags = {
+        flashEnabled: false,
+    };
     // DOM element references
     const elProject = document.getElementById("project-name");
     const elTempo = document.getElementById("tempo-value");
     const elStatus = document.getElementById("status");
-    const elBeat = document.getElementById("beat-indicator"); // Optional beat dot element
 
     let isPlaying = false;
     let currentBpm = 120;
     let beatIntervalId = null;
+    let flashTimeoutId = null;
 
     // Open SSE connection to the Axum route
     const evtSource = new EventSource("/events");
@@ -120,9 +138,13 @@
 
     // Visual metronome pulse helper functions
     function triggerFlash() {
-        if (!elBeat) return;
-        elBeat.classList.add("flash");
-        setTimeout(() => elBeat.classList.remove("flash"), 70);
+        if (!flags.flashEnabled || !elTempo) return;
+        clearTimeout(flashTimeoutId);
+        elTempo.classList.add("flash");
+        flashTimeoutId = setTimeout(() => {
+            elTempo.classList.remove("flash");
+            flashTimeoutId = null;
+        }, 70);
     }
 
     function startMetronomePulse() {
@@ -133,12 +155,16 @@
     }
 
     function stopMetronomePulse() {
-        if (beatIntervalId) {
+        if (beatIntervalId !== null) {
             clearInterval(beatIntervalId);
             beatIntervalId = null;
         }
-        if (elBeat) {
-            elBeat.classList.remove("flash");
+        if (flashTimeoutId !== null) {
+            clearTimeout(flashTimeoutId);
+            flashTimeoutId = null;
+        }
+        if (elTempo) {
+            elTempo.classList.remove("flash");
         }
     }
 </script>
