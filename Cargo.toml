@@ -1,0 +1,12 @@
+[package]
+name = "arduino-osc-bridge"
+version = "0.1.0"
+edition = "2021"
+description = "Asynchronous Rust daemon bridging an Arduino hardware controller (USB Serial) to Reaper DAW via OSC/UDP"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-serial = "5.4"
+rosc = "0.10"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
