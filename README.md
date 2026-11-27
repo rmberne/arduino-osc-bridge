@@ -97,6 +97,21 @@ cargo build --release
 
 Example: `cargo run -- --no-arduino` or `./target/release/arduino-osc-bridge --no-web-server`.
 
+## Logs (macOS package install)
+
+The `.pkg` installs a launchd daemon (`/Library/LaunchDaemons/com.example.arduino-osc-bridge.plist`)
+that redirects stdout and stderr to:
+
+```
+/var/log/arduino-osc-bridge.log
+```
+
+The file is appended to across restarts, reboots and reinstalls. To follow it:
+
+```zsh
+tail -f /var/log/arduino-osc-bridge.log
+```
+
 ## Unit testing
 
 Run the test suite to verify command mappings, OSC packet encoding/decoding, and domain state event dispatch:

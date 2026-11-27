@@ -25,6 +25,7 @@ mod arduino_manager;
 mod osc_manager;
 mod web_server;
 
+use std::io::IsTerminal;
 use std::net::SocketAddr;
 
 use tokio::sync::{mpsc, watch};
@@ -186,9 +187,12 @@ async fn main() {
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // Under launchd stdout is redirected to a log file; skip ANSI color
+    // codes there so the file stays plain, greppable text.
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(true)
+        .with_ansi(std::io::stdout().is_terminal())
         .init();
 }
 
